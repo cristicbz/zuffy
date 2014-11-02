@@ -1,0 +1,10 @@
+[package]
+name = "zuffy"
+version = "0.0.1"
+authors = ["Cristian Cobzarenco <cristi.cobzarenco@gmail.com>"]
+
+[[bin]]
+name = "zuffy"
+
+[dependencies.zmq]
+git = "https://github.com/jedisct1/rust-zmq"
