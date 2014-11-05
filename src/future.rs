@@ -1,7 +1,7 @@
 use movecell::MoveCell;
 use std::rc::Rc;
 
-pub type Chainer<I> = Box<FnOnce<(I,), ()> + 'static>;
+pub type Chainer<I> = proc(I):'static -> ();
 
 pub trait Fulfiller<T> {
     fn sync(&mut self, promise: Promise<T>);
@@ -35,29 +35,29 @@ impl<T> Promise<T> {
         }
     }
 
-    fn into_cont(self) -> Cont<T> {
-        Cont { state: self.state }
+    fn into_cont(self) -> Future<T> {
+        Future { state: self.state }
     }
 
     pub fn fulfill(self, value: T) -> () {
         let state = self.state;
         match state.take() {
             None => { state.put(Ready(value)); },
-            Some(Chained(next)) => next.call_once((value,)),
+            Some(Chained(next)) => next(value),
             _ => unreachable!(),
         }
     }
 }
 
 #[must_use]
-pub struct Future<'a, T, F: Fulfiller<T> + 'a> {
+pub struct Operation<'a, T, F: Fulfiller<T> + 'a> {
     fulfiller: Option<&'a mut F>,
     state: StateRef<T>,
 }
 
-impl<'a, T, F: Fulfiller<T>> Future<'a, T, F> {
-    pub fn new(fulfiller: &mut F) -> Future<T, F> {
-        Future {
+impl<'a, T, F: Fulfiller<T>> Operation<'a, T, F> {
+    pub fn new(fulfiller: &mut F) -> Operation<T, F> {
+        Operation {
             fulfiller: Some(fulfiller),
             state: new_state(),
         }
@@ -80,12 +80,12 @@ impl<'a, T, F: Fulfiller<T>> Future<'a, T, F> {
         }
     }
 
-    pub fn async(self) -> Cont<T> {
+    pub fn async(self) -> Future<T> {
         let promise = self.make_promise();
         match self.fulfiller {
             Some(f) => f.async(promise), _ => {}
         }
-        Cont { state: self.state }
+        Future { state: self.state }
     }
 
     fn make_promise(&self) -> Promise<T> {
@@ -93,35 +93,34 @@ impl<'a, T, F: Fulfiller<T>> Future<'a, T, F> {
     }
 }
 
-impl<T> Future<'static, T, NoopFulfiller<T>> {
-    pub fn new_ready(value: T) -> Future<'static, T, NoopFulfiller<T>> {
-        Future {
+impl<T> Operation<'static, T, NoopFulfiller<T>> {
+    pub fn new_ready(value: T) -> Operation<'static, T, NoopFulfiller<T>> {
+        Operation {
             fulfiller: None,
             state: Rc::new(MoveCell::from_value(Ready(value))),
         }
     }
 
     pub fn new_with_promise() ->
-            (Future<'static, T, NoopFulfiller<T>>, Promise<T>) {
-        let fut = Future { fulfiller: None, state: new_state() };
-        let prom = fut.make_promise();
-        (fut, prom)
+            (Operation<'static, T, NoopFulfiller<T>>, Promise<T>) {
+        let op = Operation { fulfiller: None, state: new_state() };
+        let prom = op.make_promise();
+        (op, prom)
     }
 }
 
 
-pub struct Cont<T> {
+pub struct Future<T> {
     state: StateRef<T>,
 }
-impl<T> Cont<T> {
+impl<T> Future<T> {
     pub fn ready(&self) -> bool {
         match self.state.get_ref() {
             Some(&Ready(_)) => true, _ => false
         }
     }
 
-    pub fn map<U: 'static, C: FnOnce<(T,), U> + 'static>(self, through: C)
-            -> Cont<U> {
+    pub fn map<U: 'static>(self, through: proc(T):'static -> U) -> Future<U> {
         let promise = Promise::new();
         let cont = promise.clone().into_cont();
 
@@ -130,10 +129,9 @@ impl<T> Cont<T> {
                 promise.fulfill(through(x));
             },
             None => {
-                self.state.put(Chained(
-                        (box move |: from: T| -> () {
-                            promise.fulfill(through(from))
-                        }) as Chainer<T>));
+                self.state.put(Chained(proc(from) {
+                    promise.fulfill(through(from))
+                }));
             }
             _ => unreachable!()
         }
@@ -141,24 +139,20 @@ impl<T> Cont<T> {
         cont
     }
 
-    pub fn then<U: 'static, C: FnOnce<(T,), Cont<U>> + 'static>(self, next: C)
-            -> Cont<U> {
+    pub fn then<U: 'static>(self, next: proc(T):'static -> Future<U>)
+            -> Future<U> {
         let promise = Promise::new();
         let cont = promise.clone().into_cont();
         match self.state.take() {
             Some(Ready(from)) => {
-                next(from).map(move |: to: U| -> () {
-                    promise.fulfill(to);
-                });
+                next(from).map(proc(to) { promise.fulfill(to); });
             },
             None => {
-                self.state.put(Chained(
-                    (box move |: from: T| -> () {
-                        next(from).map(move |: to: U| -> () {
+                self.state.put(Chained(proc(from) {
+                        next(from).map(proc(to) {
                             promise.fulfill(to)
                         });
-                    })
-                    as Chainer<T>));
+                }));
             }
             _ => unreachable!()
         }
@@ -179,11 +173,11 @@ fn new_state<T>() -> StateRef<T> { Rc::new(MoveCell::new()) }
 #[cfg(test)]
 pub mod test {
     use super::Fulfiller;
-    use super::Future;
-    use super::Cont;
+    use super::Operation;
     use super::Promise;
 
     use std::cell::Cell;
+    use std::cell::RefCell;
     use std::default::Default;
     use std::rc::Rc;
 
@@ -211,9 +205,9 @@ pub mod test {
         }
 
         pub fn start(&mut self, constant: T)
-                -> Future<T, ConstantFulfiller<T>> {
+                -> Operation<T, ConstantFulfiller<T>> {
             self.constant = constant;
-            Future::new(self)
+            Operation::new(self)
         }
 
         pub fn poll(&mut self) {
@@ -259,7 +253,7 @@ pub mod test {
 
             {   let cont = ful.start("foo".to_string()).async();
                 assert_eq!(cont.ready(), *eager);
-                cont.map(move |: x: String| {
+                cont.map(proc(x) {
                     assert_eq!(x.as_slice(), "foo");
                     called_setter.set(true);
                 });
@@ -268,21 +262,30 @@ pub mod test {
             assert!(called_getter.get(), "eager: {}", eager);
         }
     }
+
     #[test]
     fn test_ready() {
-        let fut = Future::new_ready(5u);
-        assert!(fut.ready());
-        assert_eq!(fut.sync(), 5u);
+        let op = Operation::new_ready(5u);
+        assert!(op.ready());
+        assert_eq!(op.sync(), 5u);
     }
 
     #[test]
     fn test_one_then() {
-        let mut client = ConstantFulfiller::<uint>::new();
+        let mut client = ConstantFulfiller::new();
+        let client2 = Rc::new(RefCell::new(ConstantFulfiller::new()));
+        let client2_clone = client2.clone();
+        let (fut, prom) = Operation::new_with_promise();
 
         client.start(5u).async()
-            .then(move |: x: uint| -> Cont<uint> {
-                Future::new_ready(x).async()
+            .then(proc(x) {
+                client2.borrow_mut().start(x + 2u).async()
+            })
+            .map(proc(x) {
+                prom.fulfill(x);
             });
         client.poll();
+        client2_clone.borrow_mut().poll();
+        assert_eq!(fut.sync(), 7u);
     }
 }
