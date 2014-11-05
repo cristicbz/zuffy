@@ -50,14 +50,14 @@ impl<T> Promise<T> {
 }
 
 #[must_use]
-pub struct Operation<'a, T, F: Fulfiller<T> + 'a> {
+pub struct SyncFuture<'a, T, F: Fulfiller<T> + 'a> {
     fulfiller: Option<&'a mut F>,
     state: StateRef<T>,
 }
 
-impl<'a, T, F: Fulfiller<T>> Operation<'a, T, F> {
-    pub fn new(fulfiller: &mut F) -> Operation<T, F> {
-        Operation {
+impl<'a, T, F: Fulfiller<T>> SyncFuture<'a, T, F> {
+    pub fn new(fulfiller: &mut F) -> SyncFuture<T, F> {
+        SyncFuture {
             fulfiller: Some(fulfiller),
             state: new_state(),
         }
@@ -93,17 +93,17 @@ impl<'a, T, F: Fulfiller<T>> Operation<'a, T, F> {
     }
 }
 
-impl<T> Operation<'static, T, NoopFulfiller<T>> {
-    pub fn new_ready(value: T) -> Operation<'static, T, NoopFulfiller<T>> {
-        Operation {
+impl<T> SyncFuture<'static, T, NoopFulfiller<T>> {
+    pub fn new_ready(value: T) -> SyncFuture<'static, T, NoopFulfiller<T>> {
+        SyncFuture {
             fulfiller: None,
             state: Rc::new(MoveCell::from_value(Ready(value))),
         }
     }
 
     pub fn new_with_promise() ->
-            (Operation<'static, T, NoopFulfiller<T>>, Promise<T>) {
-        let op = Operation { fulfiller: None, state: new_state() };
+            (SyncFuture<'static, T, NoopFulfiller<T>>, Promise<T>) {
+        let op = SyncFuture { fulfiller: None, state: new_state() };
         let prom = op.make_promise();
         (op, prom)
     }
@@ -173,7 +173,7 @@ fn new_state<T>() -> StateRef<T> { Rc::new(MoveCell::new()) }
 #[cfg(test)]
 pub mod test {
     use super::Fulfiller;
-    use super::Operation;
+    use super::SyncFuture;
     use super::Promise;
 
     use std::cell::Cell;
@@ -205,9 +205,9 @@ pub mod test {
         }
 
         pub fn start(&mut self, constant: T)
-                -> Operation<T, ConstantFulfiller<T>> {
+                -> SyncFuture<T, ConstantFulfiller<T>> {
             self.constant = constant;
-            Operation::new(self)
+            SyncFuture::new(self)
         }
 
         pub fn poll(&mut self) {
@@ -265,17 +265,17 @@ pub mod test {
 
     #[test]
     fn test_ready() {
-        let op = Operation::new_ready(5u);
-        assert!(op.ready());
-        assert_eq!(op.sync(), 5u);
+        let fut = SyncFuture::new_ready(5u);
+        assert!(fut.ready());
+        assert_eq!(fut.sync(), 5u);
     }
 
     #[test]
-    fn test_one_then() {
+    fn test_then_map() {
         let mut client = ConstantFulfiller::new();
         let client2 = Rc::new(RefCell::new(ConstantFulfiller::new()));
         let client2_clone = client2.clone();
-        let (fut, prom) = Operation::new_with_promise();
+        let (fut, prom) = SyncFuture::new_with_promise();
 
         client.start(5u).async()
             .then(proc(x) {
@@ -287,5 +287,40 @@ pub mod test {
         client.poll();
         client2_clone.borrow_mut().poll();
         assert_eq!(fut.sync(), 7u);
+    }
+
+    #[test]
+    fn test_then_many() {
+        let mut client = ConstantFulfiller::new();
+        let client2 = Rc::new(RefCell::new(ConstantFulfiller::new()));
+        let client3 = Rc::new(RefCell::new(ConstantFulfiller::new()));
+        let client4 = Rc::new(RefCell::new(ConstantFulfiller::new()));
+        let client5 = Rc::new(RefCell::new(ConstantFulfiller::new()));
+        let client2_clone = client2.clone();
+        let client3_clone = client3.clone();
+        let client4_clone = client4.clone();
+        let client5_clone = client5.clone();
+        let (fut, prom) = SyncFuture::new_with_promise();
+
+        client.start(2u)
+            .async().then(proc(x) {
+                client2.borrow_mut().start(x * 3u).async()
+            }).then(proc(x) {
+                client3.borrow_mut().start(x * 5u).async()
+            }).map(proc(x) {
+                x * 7u
+            }).then(proc(x) {
+                client4.borrow_mut().start(x * 11u).async()
+            }).then(proc(x) {
+                client5.borrow_mut().start(x * 13u).async()
+            }).map(proc(x) {
+                prom.fulfill(x);
+            });
+        client.poll();
+        client2_clone.borrow_mut().poll();
+        client3_clone.borrow_mut().poll();
+        client4_clone.borrow_mut().poll();
+        client5_clone.borrow_mut().poll();
+        assert_eq!(fut.sync(), 2*3*5*7*11*13);
     }
 }
