@@ -1,16 +1,14 @@
 use lazy::Lazy;
 use std::str::{MaybeOwned, IntoMaybeOwned, Slice, Owned};
 
-mod lazy;
-
 #[deriving(Eq, PartialEq, Show)]
-enum ErrorCode {
+pub enum ErrorCode {
     DeadlineExceeded,
     NetworkError,
     InternalServerError,
 }
 
-struct Error {
+pub struct Error {
     code: ErrorCode,
     desc: Lazy<MaybeOwned<'static>>,
 }
