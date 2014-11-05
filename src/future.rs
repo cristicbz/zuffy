@@ -35,7 +35,7 @@ impl<T> Promise<T> {
         }
     }
 
-    fn into_cont(self) -> Future<T> {
+    fn into_future(self) -> Future<T> {
         Future { state: self.state }
     }
 
@@ -122,8 +122,7 @@ impl<T> Future<T> {
 
     pub fn map<U: 'static>(self, through: proc(T):'static -> U) -> Future<U> {
         let promise = Promise::new();
-        let cont = promise.clone().into_cont();
-
+        let cont = promise.clone().into_future();
         match self.state.take() {
             Some(Ready(x)) => {
                 promise.fulfill(through(x));
@@ -135,14 +134,13 @@ impl<T> Future<T> {
             }
             _ => unreachable!()
         }
-
         cont
     }
 
     pub fn then<U: 'static>(self, next: proc(T):'static -> Future<U>)
             -> Future<U> {
         let promise = Promise::new();
-        let cont = promise.clone().into_cont();
+        let cont = promise.clone().into_future();
         match self.state.take() {
             Some(Ready(from)) => {
                 next(from).map(proc(to) { promise.fulfill(to); });
