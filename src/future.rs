@@ -1,8 +1,6 @@
 use movecell::MoveCell;
 use std::rc::Rc;
 
-pub type Chainer<I> = proc(I):'static -> ();
-
 pub trait Fulfiller<T> {
     fn sync(&mut self, promise: Promise<T>);
     fn async(&mut self, promise: Promise<T>);
@@ -35,8 +33,8 @@ impl<T> Promise<T> {
         }
     }
 
-    fn into_future(self) -> Future<T> {
-        Future { state: self.state }
+    fn into_future(self) -> AsyncFuture<T> {
+        AsyncFuture { state: self.state }
     }
 
     pub fn fulfill(self, value: T) -> () {
@@ -50,14 +48,14 @@ impl<T> Promise<T> {
 }
 
 #[must_use]
-pub struct SyncFuture<'a, T, F: Fulfiller<T> + 'a> {
+pub struct Future<'a, T, F: Fulfiller<T> + 'a> {
     fulfiller: Option<&'a mut F>,
     state: StateRef<T>,
 }
 
-impl<'a, T, F: Fulfiller<T>> SyncFuture<'a, T, F> {
-    pub fn new(fulfiller: &mut F) -> SyncFuture<T, F> {
-        SyncFuture {
+impl<'a, T, F: Fulfiller<T>> Future<'a, T, F> {
+    pub fn new(fulfiller: &mut F) -> Future<T, F> {
+        Future {
             fulfiller: Some(fulfiller),
             state: new_state(),
         }
@@ -80,12 +78,12 @@ impl<'a, T, F: Fulfiller<T>> SyncFuture<'a, T, F> {
         }
     }
 
-    pub fn async(self) -> Future<T> {
+    pub fn async(self) -> AsyncFuture<T> {
         let promise = self.make_promise();
         match self.fulfiller {
             Some(f) => f.async(promise), _ => {}
         }
-        Future { state: self.state }
+        AsyncFuture { state: self.state }
     }
 
     fn make_promise(&self) -> Promise<T> {
@@ -93,34 +91,35 @@ impl<'a, T, F: Fulfiller<T>> SyncFuture<'a, T, F> {
     }
 }
 
-impl<T> SyncFuture<'static, T, NoopFulfiller<T>> {
-    pub fn new_ready(value: T) -> SyncFuture<'static, T, NoopFulfiller<T>> {
-        SyncFuture {
+impl<T> Future<'static, T, NoopFulfiller<T>> {
+    pub fn new_ready(value: T) -> Future<'static, T, NoopFulfiller<T>> {
+        Future {
             fulfiller: None,
             state: Rc::new(MoveCell::from_value(Ready(value))),
         }
     }
 
     pub fn new_with_promise() ->
-            (SyncFuture<'static, T, NoopFulfiller<T>>, Promise<T>) {
-        let op = SyncFuture { fulfiller: None, state: new_state() };
+            (Future<'static, T, NoopFulfiller<T>>, Promise<T>) {
+        let op = Future { fulfiller: None, state: new_state() };
         let prom = op.make_promise();
         (op, prom)
     }
 }
 
 
-pub struct Future<T> {
+pub struct AsyncFuture<T> {
     state: StateRef<T>,
 }
-impl<T> Future<T> {
+impl<T> AsyncFuture<T> {
     pub fn ready(&self) -> bool {
         match self.state.get_ref() {
             Some(&Ready(_)) => true, _ => false
         }
     }
 
-    pub fn map<U: 'static>(self, through: proc(T):'static -> U) -> Future<U> {
+    pub fn map<U: 'static>(self, through: proc(T):'static -> U)
+            -> AsyncFuture<U> {
         let promise = Promise::new();
         let cont = promise.clone().into_future();
         match self.state.take() {
@@ -137,8 +136,8 @@ impl<T> Future<T> {
         cont
     }
 
-    pub fn then<U: 'static>(self, next: proc(T):'static -> Future<U>)
-            -> Future<U> {
+    pub fn then<U: 'static>(self, next: proc(T):'static -> AsyncFuture<U>)
+            -> AsyncFuture<U> {
         let promise = Promise::new();
         let cont = promise.clone().into_future();
         match self.state.take() {
@@ -160,7 +159,7 @@ impl<T> Future<T> {
 
 enum State<T> {
     Ready(T),
-    Chained(Chainer<T>),
+    Chained(proc(T):'static -> ()),
 }
 
 type StateRef<T> = Rc<MoveCell<State<T>>>;
@@ -171,7 +170,7 @@ fn new_state<T>() -> StateRef<T> { Rc::new(MoveCell::new()) }
 #[cfg(test)]
 pub mod test {
     use super::Fulfiller;
-    use super::SyncFuture;
+    use super::Future;
     use super::Promise;
 
     use std::cell::Cell;
@@ -203,9 +202,9 @@ pub mod test {
         }
 
         pub fn start(&mut self, constant: T)
-                -> SyncFuture<T, ConstantFulfiller<T>> {
+                -> Future<T, ConstantFulfiller<T>> {
             self.constant = constant;
-            SyncFuture::new(self)
+            Future::new(self)
         }
 
         pub fn poll(&mut self) {
@@ -263,7 +262,7 @@ pub mod test {
 
     #[test]
     fn test_ready() {
-        let fut = SyncFuture::new_ready(5u);
+        let fut = Future::new_ready(5u);
         assert!(fut.ready());
         assert_eq!(fut.sync(), 5u);
     }
@@ -273,7 +272,7 @@ pub mod test {
         let mut client = ConstantFulfiller::new();
         let client2 = Rc::new(RefCell::new(ConstantFulfiller::new()));
         let client2_clone = client2.clone();
-        let (fut, prom) = SyncFuture::new_with_promise();
+        let (fut, prom) = Future::new_with_promise();
 
         client.start(5u).async()
             .then(proc(x) {
@@ -298,7 +297,7 @@ pub mod test {
         let client3_clone = client3.clone();
         let client4_clone = client4.clone();
         let client5_clone = client5.clone();
-        let (fut, prom) = SyncFuture::new_with_promise();
+        let (fut, prom) = Future::new_with_promise();
 
         client.start(2u)
             .async().then(proc(x) {
